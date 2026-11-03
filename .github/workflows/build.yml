@@ -25,6 +25,9 @@ jobs:
           rm -rf test
           python3 app_src/patch_manifest.py
       - run: flutter pub get
+      - name: Eklenti uyumsuzlugunu duzelt (proguard)
+        run: |
+          find ~/.pub-cache -type f \( -name build.gradle -o -name build.gradle.kts \) -exec sed -i "s/proguard-android.txt/proguard-android-optimize.txt/g" {} +
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
