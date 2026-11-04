@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -282,53 +283,97 @@ String nameOf(String url) {
 const String _scanJs = r'''
 const re = new RegExp('\\.(' + exts.join('|') + ')\\d*(?:[.?#]|$)', 'i');
 const found = new Map();
-function grab(doc, base) {
-  doc.querySelectorAll('a[href], source[src], embed[src], link[href]').forEach(el => {
+window.__ykStatus = '';
+function allEls(root, sel, out) {
+  root.querySelectorAll(sel).forEach(e => out.push(e));
+  root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) allEls(e.shadowRoot, sel, out); });
+  return out;
+}
+function grab(doc, base, title, once, shadow) {
+  const els = shadow ? allEls(doc, 'a[href], source[src], embed[src]', []) : Array.from(doc.querySelectorAll('a[href], source[src], embed[src]'));
+  const seenExt = new Set();
+  els.forEach(el => {
     const raw = el.getAttribute('href') || el.getAttribute('src');
     if (!raw) return;
     let u;
     try { u = new URL(raw, base); } catch (e) { return; }
-    if (!re.test(u.pathname + u.search)) return;
+    const m = re.exec(u.pathname + u.search);
+    if (!m) return;
+    const ext = m[1].toLowerCase();
+    if (once && seenExt.has(ext)) return;
     u.hash = '';
     const s = u.href;
-    const t = (el.textContent || el.getAttribute('title') || '').trim().replace(/\s+/g, ' ').slice(0, 120);
-    if (!found.has(s) || (!found.get(s) && t)) found.set(s, t);
+    if (found.has(s)) return;
+    seenExt.add(ext);
+    const t = ((title || '') + ' ' + (el.textContent || el.getAttribute('title') || '')).trim().replace(/\s+/g, ' ').slice(0, 160);
+    found.set(s, t);
   });
 }
-grab(document, location.href);
-if (deep) {
-  const origin = location.origin;
-  const seen = new Set([location.href.split('#')[0]]);
-  const queue = [];
-  const skip = /\.(jpg|jpeg|png|gif|webp|svg|css|js|ico|mp3|mp4|woff2?|ttf)$/i;
-  const addLinks = (doc, base) => {
-    doc.querySelectorAll('a[href]').forEach(a => {
-      try {
-        const u = new URL(a.getAttribute('href'), base);
-        u.hash = '';
-        if (u.origin === origin && !re.test(u.pathname + u.search) && !skip.test(u.pathname)) {
-          const s = u.href;
-          if (!seen.has(s)) { seen.add(s); queue.push(s); }
-        }
-      } catch (e) {}
+async function archiveItem(url, once) {
+  try {
+    const u = new URL(url, location.href);
+    const mm = u.pathname.match(/^\/details\/([^\/?#]+)/);
+    if (!mm || !u.hostname.endsWith('archive.org')) return false;
+    const id = mm[1];
+    const r = await fetch('https://' + u.hostname + '/metadata/' + encodeURIComponent(id), { credentials: 'include' });
+    const j = await r.json();
+    const title = (j.metadata && j.metadata.title) ? String(j.metadata.title) : id;
+    const seenExt = new Set();
+    (j.files || []).forEach(f => {
+      const name = f.name || '';
+      const m = re.exec('/' + name);
+      if (!m) return;
+      const ext = m[1].toLowerCase();
+      if (once && seenExt.has(ext)) return;
+      seenExt.add(ext);
+      const s = 'https://' + u.hostname + '/download/' + encodeURIComponent(id) + '/' + name.split('/').map(encodeURIComponent).join('/');
+      found.set(s, title.slice(0, 160));
     });
-  };
-  addLinks(document, location.href);
+    return true;
+  } catch (e) { return false; }
+}
+const origin = location.origin;
+const skip = /\.(jpg|jpeg|png|gif|webp|svg|css|js|ico|mp3|mp4|woff2?|ttf|xml|json)$/i;
+function pageLinks(doc, base, shadow) {
+  const els = shadow ? allEls(doc, 'a[href]', []) : Array.from(doc.querySelectorAll('a[href]'));
+  const out = [];
+  els.forEach(a => {
+    if (a.closest && a.closest('nav, header, footer')) return;
+    try {
+      const u = new URL(a.getAttribute('href'), base);
+      u.hash = '';
+      if (/^https?:$/.test(u.protocol) && u.origin === origin && !re.test(u.pathname + u.search) && !skip.test(u.pathname)) out.push(u.href);
+    } catch (e) {}
+  });
+  return out;
+}
+grab(document, location.href, document.title, false, true);
+await archiveItem(location.href, once);
+if (depth > 0) {
+  const seen = new Set([location.href.split('#')[0]]);
+  let level = [];
+  const add = (links, arr) => links.forEach(l => { if (!seen.has(l)) { seen.add(l); arr.push(l); } });
+  add(pageLinks(document, location.href, true), level);
   let n = 0;
-  while (queue.length && n < maxPages) {
-    const batch = queue.splice(0, Math.min(4, maxPages - n));
-    n += batch.length;
-    await Promise.all(batch.map(async next => {
-      try {
-        const r = await fetch(next, { credentials: 'include' });
-        const ct = r.headers.get('content-type') || '';
-        if (!ct.includes('text/html')) return;
-        const html = await r.text();
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        grab(doc, next);
-        addLinks(doc, next);
-      } catch (e) {}
-    }));
+  for (let d = 1; d <= depth && level.length && n < maxPages; d++) {
+    const nextLevel = [];
+    while (level.length && n < maxPages) {
+      const batch = level.splice(0, Math.min(4, maxPages - n));
+      n += batch.length;
+      window.__ykStatus = n + ' sayfa tarandi, ' + found.size + ' dosya bulundu';
+      await Promise.all(batch.map(async next => {
+        try {
+          if (await archiveItem(next, once)) return;
+          const r = await fetch(next, { credentials: 'include' });
+          const ct = r.headers.get('content-type') || '';
+          if (!ct.includes('text/html')) return;
+          const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+          grab(doc, next, doc.title, once, false);
+          if (d < depth) add(pageLinks(doc, next, false), nextLevel);
+        } catch (e) {}
+      }));
+    }
+    level = nextLevel;
   }
 }
 return Array.from(found.entries()).map(([u, t]) => ({ url: u, text: t }));
@@ -346,8 +391,10 @@ class _CapturePageState extends State<CapturePage> {
   final Set<String> selFormats = {'epub', 'pdf'};
   final extraCtl = TextEditingController();
   final keyCtl = TextEditingController();
-  bool deep = false;
-  int maxPages = 30;
+  int depth = 1;
+  bool once = true;
+  int maxPages = 100;
+  Timer? poll;
   bool scanning = false;
   String msg = 'Format sec, sonra Yakala\'ya bas.';
   List<FileItem> items = [];
@@ -372,12 +419,20 @@ class _CapturePageState extends State<CapturePage> {
     setState(() {
       scanning = true;
       items = [];
-      msg = deep ? 'Site taraniyor, biraz surebilir...' : 'Sayfa taraniyor...';
+      msg = 'Taraniyor, biraz surebilir...';
+    });
+    poll?.cancel();
+    poll = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+      try {
+        final r = await widget.controller.evaluateJavascript(source: 'window.__ykStatus');
+        final t = r?.toString() ?? '';
+        if (mounted && scanning && t.isNotEmpty && t != 'null') setState(() => msg = t);
+      } catch (_) {}
     });
     try {
       final res = await widget.controller.callAsyncJavaScript(
         functionBody: _scanJs,
-        arguments: {'exts': exts.toList(), 'deep': deep, 'maxPages': maxPages},
+        arguments: {'exts': exts.toList(), 'depth': depth, 'once': once, 'maxPages': maxPages},
       );
       final raw = (res?.value as List?) ?? [];
       final words = keyCtl.text
@@ -413,7 +468,14 @@ class _CapturePageState extends State<CapturePage> {
     } catch (e) {
       setState(() => msg = 'Tarama hatasi: $e');
     }
-    setState(() => scanning = false);
+    poll?.cancel();
+    if (mounted) setState(() => scanning = false);
+  }
+
+  @override
+  void dispose() {
+    poll?.cancel();
+    super.dispose();
   }
 
   Future<void> _downloadSelected() async {
@@ -470,26 +532,53 @@ class _CapturePageState extends State<CapturePage> {
             ),
           ]),
         ),
-        SwitchListTile(
-          dense: true,
-          title: const Text('Tum siteyi tara (sayfa sayfa gez)'),
-          value: deep,
-          onChanged: (v) => setState(() => deep = v),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<int>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: 0, label: Text('Bu sayfa')),
+                ButtonSegment(value: 1, label: Text('Kitap sayfalari')),
+                ButtonSegment(value: 2, label: Text('Derin')),
+              ],
+              selected: {depth},
+              onSelectionChanged: (s) => setState(() => depth = s.first),
+            ),
+          ),
         ),
-        if (deep)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+          child: Text(
+            depth == 0
+                ? 'Sadece ekrandaki sayfadaki dosya baglantilari.'
+                : depth == 1
+                    ? 'Listedeki her kitabin sayfasina girip dosyalari bulur.'
+                    : 'Kitap sayfalarina ve onlarin bagli sayfalarina da girer (yavas).',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        if (depth > 0)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(children: [
               const Text('En fazla sayfa: '),
               DropdownButton<int>(
                 value: maxPages,
-                items: [10, 30, 100, 300]
+                items: [30, 100, 300, 1000]
                     .map((n) => DropdownMenuItem(value: n, child: Text('$n')))
                     .toList(),
-                onChanged: (v) => setState(() => maxPages = v ?? 30),
+                onChanged: (v) => setState(() => maxPages = v ?? 100),
               ),
             ]),
           ),
+        SwitchListTile(
+          dense: true,
+          title: const Text('Her kitaptan her formatin tek dosyasi'),
+          value: once,
+          onChanged: (v) => setState(() => once = v),
+        ),
         Padding(
           padding: const EdgeInsets.all(8),
           child: SizedBox(
