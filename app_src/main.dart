@@ -191,14 +191,15 @@ class Downloader {
   }
 
   static Future<void> download(FileItem it, InAppWebViewController? c,
-      String referer, VoidCallback onUpdate) async {
+      String referer, VoidCallback onUpdate,
+      {Directory? into}) async {
     it.status = 'indiriliyor';
     it.error = '';
     it.progress = 0;
     onUpdate();
     String? path;
     try {
-      final d = await dir();
+      final d = into ?? await dir();
       path = uniquePath(d, it.name);
       if (_ua == null && c != null) {
         try {
@@ -549,6 +550,13 @@ class _BrowserPageState extends State<BrowserPage> {
                     t.c?.printCurrentPage();
                   } else if (v == 'fav') {
                     _addSite();
+                  } else if (v == 'torrent') {
+                    if (t.c != null) {
+                      Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => TorrentPage(controller: t.c!, getUrl: () => t.url)));
+                    }
                   }
                 },
                 itemBuilder: (_) => [
@@ -560,6 +568,7 @@ class _BrowserPageState extends State<BrowserPage> {
                   const PopupMenuItem(value: 'print', child: Text('PDF yap (tam sayfa)')),
                   const PopupMenuDivider(),
                   const PopupMenuItem(value: 'fav', child: Text('Siteyi kisayola ekle')),
+                  const PopupMenuItem(value: 'torrent', child: Text('Forum: magnet/torrent topla')),
                 ],
               ),
             ]),
@@ -1094,6 +1103,334 @@ class _CapturePageState extends State<CapturePage> {
                   icon: const Icon(Icons.download_for_offline),
                   label: Text('Secilenleri indir ($selCount)'),
                   onPressed: selCount == 0 ? null : _downloadSelected,
+                ),
+              ),
+            ),
+          ),
+      ]),
+    );
+  }
+}
+
+
+// ---------- Forum: magnet / torrent toplama ----------
+const String _topicJs = r"""
+const origin = location.origin;
+window.__ykStatus = '';
+function topicLinks(doc, base) {
+  const out = new Map();
+  doc.querySelectorAll('a[href]').forEach(a => {
+    if (a.closest && a.closest('nav, header, footer')) return;
+    let u;
+    try { u = new URL(a.getAttribute('href'), base); } catch (e) { return; }
+    if (u.origin !== origin) return;
+    if (!/viewtopic|showthread|topic|thread|\/t\//i.test(u.pathname + u.search)) return;
+    if (u.searchParams.has('start')) return;
+    u.hash = '';
+    const txt = (a.textContent || '').trim().replace(/\s+/g, ' ');
+    if (!txt || /^\d+$/.test(txt)) return;
+    const key = u.searchParams.get('t') ? u.origin + u.pathname + '?t=' + u.searchParams.get('t') : u.href;
+    if (!out.has(key) || out.get(key).length < txt.length) out.set(key, txt);
+  });
+  return out;
+}
+const here = new URL(location.href);
+const topics = topicLinks(document, location.href);
+const starts = [];
+document.querySelectorAll('a[href]').forEach(a => {
+  try {
+    const u = new URL(a.getAttribute('href'), location.href);
+    if (u.origin === origin && u.pathname === here.pathname) {
+      const s = parseInt(u.searchParams.get('start') || '0');
+      if (s > 0) starts.push(s);
+    }
+  } catch (e) {}
+});
+const step = starts.length ? Math.min.apply(null, starts) : 0;
+const curStart = parseInt(here.searchParams.get('start') || '0');
+if (listPages > 1 && step > 0) {
+  for (let i = 1; i < listPages; i++) {
+    const u = new URL(location.href);
+    u.searchParams.set('start', curStart + step * i);
+    window.__ykStatus = 'Liste sayfasi ' + (i + 1) + '/' + listPages;
+    try {
+      const r = await fetch(u.href, { credentials: 'include' });
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const m = topicLinks(doc, u.href);
+      if (m.size === 0) break;
+      m.forEach((v, k) => { if (!topics.has(k)) topics.set(k, v); });
+    } catch (e) { break; }
+  }
+}
+const list = Array.from(topics.entries())
+  .filter(([k, t]) => words.every(w => t.toLowerCase().includes(w)))
+  .slice(0, maxTopics);
+const res = [];
+let done = 0;
+for (let i = 0; i < list.length; i += 4) {
+  await Promise.all(list.slice(i, i + 4).map(async ([u, t]) => {
+    try {
+      const r = await fetch(u, { credentials: 'include' });
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const h1 = doc.querySelector('h1, #topic-title, .maintitle');
+      const title = ((h1 && h1.textContent) || t || doc.title || '').trim().replace(/\s+/g, ' ');
+      const body = doc.querySelector('.post_body, .post-body, .postbody, .message, article');
+      const desc = (body ? body.textContent : '').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, 8000);
+      const mags = new Set(), tors = new Set();
+      doc.querySelectorAll('a[href]').forEach(a => {
+        const h = a.getAttribute('href') || '';
+        if (h.startsWith('magnet:')) { mags.add(h); return; }
+        try {
+          const x = new URL(h, u);
+          if (x.origin === origin && (/\.torrent(\?|$)/i.test(x.pathname + x.search) || /dl\.php/i.test(x.pathname))) tors.add(x.href);
+        } catch (e) {}
+      });
+      res.push({ url: u, title: title, desc: desc, magnets: Array.from(mags), torrents: Array.from(tors) });
+    } catch (e) {}
+    done++;
+    window.__ykStatus = done + '/' + list.length + ' konu tarandi';
+  }));
+}
+return res;
+""";
+
+class TopicItem {
+  final String url;
+  final String title;
+  final String desc;
+  final List<String> magnets;
+  final List<String> torrents;
+  bool selected;
+  String status = '';
+  String error = '';
+  TopicItem(this.url, this.title, this.desc, this.magnets, this.torrents)
+      : selected = magnets.isNotEmpty || torrents.isNotEmpty;
+}
+
+class TorrentPage extends StatefulWidget {
+  final InAppWebViewController controller;
+  final String Function() getUrl;
+  const TorrentPage({super.key, required this.controller, required this.getUrl});
+  @override
+  State<TorrentPage> createState() => _TorrentPageState();
+}
+
+class _TorrentPageState extends State<TorrentPage> {
+  int listPages = 1;
+  int maxTopics = 100;
+  final keyCtl = TextEditingController();
+  Timer? poll;
+  bool busy = false;
+  String msg = 'Forum konu listesi acikken Tara\'ya bas.';
+  List<TopicItem> items = [];
+
+  @override
+  void dispose() {
+    poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _scan() async {
+    setState(() {
+      busy = true;
+      items = [];
+      msg = 'Taraniyor, biraz surebilir...';
+    });
+    poll?.cancel();
+    poll = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+      try {
+        final r = await widget.controller.evaluateJavascript(source: 'window.__ykStatus');
+        final t = r?.toString() ?? '';
+        if (mounted && busy && t.isNotEmpty && t != 'null') setState(() => msg = t);
+      } catch (_) {}
+    });
+    try {
+      final words = keyCtl.text
+          .toLowerCase()
+          .split(RegExp(r'\s+'))
+          .where((w) => w.isNotEmpty)
+          .toList();
+      final res = await widget.controller.callAsyncJavaScript(
+        functionBody: _topicJs,
+        arguments: {'listPages': listPages, 'maxTopics': maxTopics, 'words': words},
+      );
+      if (res?.error != null) throw res!.error!;
+      final raw = (res?.value as List?) ?? [];
+      final list = raw
+          .map((m) => TopicItem(
+                m['url'].toString(),
+                m['title'].toString(),
+                m['desc'].toString(),
+                (m['magnets'] as List).map((e) => e.toString()).toList(),
+                (m['torrents'] as List).map((e) => e.toString()).toList(),
+              ))
+          .toList();
+      final withLinks = list.where((e) => e.magnets.isNotEmpty || e.torrents.isNotEmpty).length;
+      setState(() {
+        items = list;
+        msg = list.isEmpty
+            ? 'Konu bulunamadi.'
+            : '${list.length} konu, ${withLinks} tanesinde magnet/torrent var.' +
+                (withLinks == 0 ? ' (Giris yapman gerekebilir.)' : '');
+      });
+    } catch (e) {
+      setState(() => msg = 'Tarama hatasi: $e');
+    }
+    poll?.cancel();
+    if (mounted) setState(() => busy = false);
+  }
+
+  String _short(String t) {
+    var c = Downloader.clean(t).replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (c.length > 80) c = c.substring(0, 80).trim();
+    while (c.endsWith('.')) {
+      c = c.substring(0, c.length - 1);
+    }
+    return c.isEmpty ? 'konu' : c;
+  }
+
+  Future<void> _saveOne(TopicItem t) async {
+    t.status = 'kaydediliyor';
+    t.error = '';
+    if (mounted) setState(() {});
+    try {
+      final base = await Downloader.dir();
+      final id = Uri.tryParse(t.url)?.queryParameters['t'] ?? '';
+      final name = id.isEmpty ? _short(t.title) : '${_short(t.title)} [$id]';
+      var folder = Directory('${base.path}/Torrent/$name');
+      var k = 1;
+      while (folder.existsSync()) {
+        k++;
+        folder = Directory('${base.path}/Torrent/$name ($k)');
+      }
+      await folder.create(recursive: true);
+      await File('${folder.path}/aciklama.txt').writeAsString(
+          'Baslik: ${t.title}\nSayfa: ${t.url}\n\nAciklama:\n${t.desc}\n');
+      for (var i = 0; i < t.magnets.length; i++) {
+        final n = t.magnets.length == 1 ? 'magnet.txt' : 'magnet_${i + 1}.txt';
+        await File('${folder.path}/$n').writeAsString('${t.magnets[i]}\n');
+      }
+      final errs = <String>[];
+      for (var i = 0; i < t.torrents.length; i++) {
+        final fn = t.torrents.length == 1 ? '${_short(t.title)}.torrent' : '${_short(t.title)}_${i + 1}.torrent';
+        final it = FileItem(t.torrents[i], fn, '');
+        await Downloader.download(it, widget.controller, widget.getUrl(), () {}, into: folder);
+        if (it.status != 'bitti') errs.add(it.error);
+      }
+      t.status = errs.isEmpty ? 'bitti' : 'hata';
+      t.error = errs.isEmpty ? '' : 'torrent inmedi: ${errs.first} (magnet ve aciklama kaydedildi)';
+    } catch (e) {
+      t.status = 'hata';
+      t.error = e.toString();
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveSelected() async {
+    final sel = items.where((i) => i.selected && i.status != 'bitti').toList();
+    for (final t in sel) {
+      await _saveOne(t);
+    }
+    if (mounted) {
+      final ok = sel.where((i) => i.status == 'bitti').length;
+      setState(() => msg = 'Bitti: $ok/${sel.length} konu kaydedildi. Klasor: Download/Yakala/Torrent');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selCount = items.where((i) => i.selected).length;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Magnet / Torrent')),
+      body: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: Row(children: [
+            const Text('Liste sayfasi: '),
+            DropdownButton<int>(
+              value: listPages,
+              items: [1, 2, 3, 5, 10, 30]
+                  .map((n) => DropdownMenuItem(value: n, child: Text('$n')))
+                  .toList(),
+              onChanged: (v) => setState(() => listPages = v ?? 1),
+            ),
+            const SizedBox(width: 16),
+            const Text('Konu: '),
+            DropdownButton<int>(
+              value: maxTopics,
+              items: [30, 100, 300, 1000]
+                  .map((n) => DropdownMenuItem(value: n, child: Text('$n')))
+                  .toList(),
+              onChanged: (v) => setState(() => maxTopics = v ?? 100),
+            ),
+          ]),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: TextField(
+            controller: keyCtl,
+            decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+                labelText: 'Baslikta kelime filtresi (istege bagli)'),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              icon: busy
+                  ? const SizedBox(
+                      width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.search),
+              label: const Text('Tara'),
+              onPressed: busy ? null : _scan,
+            ),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(msg, style: Theme.of(context).textTheme.bodySmall),
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: ListView.builder(
+            itemCount: items.length,
+            itemBuilder: (_, k) {
+              final t = items[k];
+              final has = t.magnets.isNotEmpty || t.torrents.isNotEmpty;
+              return CheckboxListTile(
+                dense: true,
+                value: t.selected,
+                onChanged: has ? (v) => setState(() => t.selected = v ?? false) : null,
+                title: Text(t.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('${t.magnets.length} magnet, ${t.torrents.length} torrent'),
+                  if (t.status == 'kaydediliyor') const LinearProgressIndicator(),
+                  if (t.status == 'bitti')
+                    const Text('Kaydedildi', style: TextStyle(color: Colors.green)),
+                  if (t.status == 'hata')
+                    Text(t.error,
+                        maxLines: 3, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                ]),
+              );
+            },
+          ),
+        ),
+        if (items.isNotEmpty)
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.save_alt),
+                  label: Text('Secilenleri klasore kaydet ($selCount)'),
+                  onPressed: selCount == 0 ? null : _saveSelected,
                 ),
               ),
             ),
