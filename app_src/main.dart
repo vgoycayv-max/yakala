@@ -1175,12 +1175,13 @@ if (listPages > 1 && step > 0) {
   for (let i = 1; i < listPages; i++) {
     const u = new URL(location.href);
     u.searchParams.set('start', curStart + step * i);
-    window.__ykStatus = 'Liste sayfasi ' + (i + 1) + '/' + listPages;
+    window.__ykStatus = 'Liste sayfasi ' + (i + 1) + (listPages < 9999 ? '/' + listPages : '') + ', ' + topics.size + ' konu';
     try {
       const doc = await getDoc(u.href);
       const m = topicLinks(doc, u.href);
-      if (m.size === 0) break;
-      m.forEach((v, k) => { if (!topics.has(k)) topics.set(k, v); });
+      let added = 0;
+      m.forEach((v, k) => { if (!topics.has(k)) { topics.set(k, v); added++; } });
+      if (added === 0) break;
     } catch (e) { break; }
   }
 }
@@ -1196,7 +1197,7 @@ for (let i = 0; i < list.length; i += 4) {
       const h1 = doc.querySelector('h1, #topic-title, .maintitle');
       const title = ((h1 && h1.textContent) || t || doc.title || '').trim().replace(/\s+/g, ' ');
       const body = doc.querySelector('.post_body, .post-body, .postbody, .message, article');
-      const desc = (body ? body.textContent : '').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, 8000);
+      const desc = (body ? body.textContent : '').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, 5000);
       const mags = new Set(), tors = new Set();
       doc.querySelectorAll('a[href]').forEach(a => {
         const h = a.getAttribute('href') || '';
@@ -1370,8 +1371,8 @@ class _TorrentPageState extends State<TorrentPage> {
             const Text('Liste sayfasi: '),
             DropdownButton<int>(
               value: listPages,
-              items: [1, 2, 3, 5, 10, 30]
-                  .map((n) => DropdownMenuItem(value: n, child: Text('$n')))
+              items: [1, 2, 3, 5, 10, 30, 100, 9999]
+                  .map((n) => DropdownMenuItem(value: n, child: Text(n >= 9999 ? 'Tumu' : '$n')))
                   .toList(),
               onChanged: (v) => setState(() => listPages = v ?? 1),
             ),
@@ -1379,8 +1380,8 @@ class _TorrentPageState extends State<TorrentPage> {
             const Text('Konu: '),
             DropdownButton<int>(
               value: maxTopics,
-              items: [30, 100, 300, 1000]
-                  .map((n) => DropdownMenuItem(value: n, child: Text('$n')))
+              items: [30, 100, 300, 1000, 5000, 100000]
+                  .map((n) => DropdownMenuItem(value: n, child: Text(n >= 100000 ? 'Sinirsiz' : '$n')))
                   .toList(),
               onChanged: (v) => setState(() => maxTopics = v ?? 100),
             ),
