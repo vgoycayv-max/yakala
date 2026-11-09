@@ -702,6 +702,19 @@ const re = exts.length ? new RegExp('\\.(' + exts.join('|') + ')\\d*(?:[.?#]|$)'
 const linkRe = /download|indir|ডাউনলোড|\/dl\b|\bget\b/i;
 const found = new Map();
 window.__ykStatus = '';
+async function getDoc(url) {
+  const r = await fetch(url, { credentials: 'include' });
+  const buf = await r.arrayBuffer();
+  let cs = ((r.headers.get('content-type') || '').match(/charset=([^;]+)/i) || [])[1];
+  if (!cs) {
+    const head = new TextDecoder('latin1').decode(buf.slice(0, 3000));
+    const m = head.match(/charset=["']?([\w-]+)/i);
+    cs = m ? m[1] : 'utf-8';
+  }
+  let txt;
+  try { txt = new TextDecoder(cs.trim()).decode(buf); } catch (e) { txt = new TextDecoder('utf-8').decode(buf); }
+  return new DOMParser().parseFromString(txt, 'text/html');
+}
 function allEls(root, sel, out) {
   root.querySelectorAll(sel).forEach(e => out.push(e));
   root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) allEls(e.shadowRoot, sel, out); });
@@ -789,10 +802,7 @@ if (depth > 0) {
       await Promise.all(batch.map(async next => {
         try {
           if (await archiveItem(next, once)) return;
-          const r = await fetch(next, { credentials: 'include' });
-          const ct = r.headers.get('content-type') || '';
-          if (!ct.includes('text/html')) return;
-          const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+          const doc = await getDoc(next);
           grab(doc, next, doc.title, once, false);
           if (d < depth) add(pageLinks(doc, next, false), nextLevel);
         } catch (e) {}
@@ -1117,6 +1127,19 @@ class _CapturePageState extends State<CapturePage> {
 const String _topicJs = r"""
 const origin = location.origin;
 window.__ykStatus = '';
+async function getDoc(url) {
+  const r = await fetch(url, { credentials: 'include' });
+  const buf = await r.arrayBuffer();
+  let cs = ((r.headers.get('content-type') || '').match(/charset=([^;]+)/i) || [])[1];
+  if (!cs) {
+    const head = new TextDecoder('latin1').decode(buf.slice(0, 3000));
+    const m = head.match(/charset=["']?([\w-]+)/i);
+    cs = m ? m[1] : 'utf-8';
+  }
+  let txt;
+  try { txt = new TextDecoder(cs.trim()).decode(buf); } catch (e) { txt = new TextDecoder('utf-8').decode(buf); }
+  return new DOMParser().parseFromString(txt, 'text/html');
+}
 function topicLinks(doc, base) {
   const out = new Map();
   doc.querySelectorAll('a[href]').forEach(a => {
@@ -1154,8 +1177,7 @@ if (listPages > 1 && step > 0) {
     u.searchParams.set('start', curStart + step * i);
     window.__ykStatus = 'Liste sayfasi ' + (i + 1) + '/' + listPages;
     try {
-      const r = await fetch(u.href, { credentials: 'include' });
-      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const doc = await getDoc(u.href);
       const m = topicLinks(doc, u.href);
       if (m.size === 0) break;
       m.forEach((v, k) => { if (!topics.has(k)) topics.set(k, v); });
@@ -1170,8 +1192,7 @@ let done = 0;
 for (let i = 0; i < list.length; i += 4) {
   await Promise.all(list.slice(i, i + 4).map(async ([u, t]) => {
     try {
-      const r = await fetch(u, { credentials: 'include' });
-      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const doc = await getDoc(u);
       const h1 = doc.querySelector('h1, #topic-title, .maintitle');
       const title = ((h1 && h1.textContent) || t || doc.title || '').trim().replace(/\s+/g, ' ');
       const body = doc.querySelector('.post_body, .post-body, .postbody, .message, article');
